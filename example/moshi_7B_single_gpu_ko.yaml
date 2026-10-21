@@ -1,0 +1,56 @@
+# Stage 1: learn Korean vocabulary and the temporal/text branch.
+data:
+  train_data: "/home/ysw/Documents/eee/moshi-finetune_re/personaplex-finetune/data/korean_talk_contiguous/omnivoice_moshi/moshi_train.jsonl"
+  eval_data: "/home/ysw/Documents/eee/moshi-finetune_re/personaplex-finetune/data/korean_talk_contiguous/omnivoice_moshi/moshi_eval.jsonl"
+  shuffle: true
+  # Exclude source recordings >= 200 seconds (200 seconds exactly is excluded).
+  max_audio_duration_sec: 200
+  # Full-duplex stereo layout: assistant target on L, user context on R.
+  target_audio_channel: 0
+  context_audio_channel: 1
+
+moshi_paths:
+  hf_repo_id: "kyutai/moshiko-pytorch-bf16"
+
+# A fresh Korean SPM is trained automatically before model loading.
+tokenizer:
+  enable: true
+  mode: extend
+  vocab_size: 10000
+  add_tokens: 4096
+  include_eval: true
+
+local_only: true
+full_finetuning: false
+lora:
+  enable: false
+
+first_codebook_weight_multiplier: 100.0
+text_padding_weight: 0.5
+# Per-step batch size is batch_size * num_microbatches = 2.
+# Full local weights still use substantial memory. Reduce duration_sec to 10
+# first if this 200-second setting does not fit on the GPU.
+duration_sec: 200
+batch_size: 4
+num_microbatches: 1
+max_steps: 2000
+gradient_checkpointing: true
+optim:
+  optimizer_type: adamw8bit
+  lr: 2.0e-5
+  weight_decay: 0.1
+  pct_start: 0.05
+
+seed: 0
+log_freq: 1
+do_eval: true
+eval_freq: 100
+do_ckpt: true
+ckpt_freq: 100
+num_ckpt_keep: 3
+save_adapters: false
+run_dir: "runs/moshi_7B_single_gpu_ko_local_stage1"
+overwrite_run_dir: false
+wandb:
+  project: null
+  offline: false

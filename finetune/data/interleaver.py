@@ -245,45 +245,93 @@ def dicho(alignment, val, i=0, j=None):
 
 
 class InterleavedTokenizer:
-    def __init__(self, mimi, interleaver, duration_sec: float):
+    def __init__(
+        self,
+        mimi,
+        interleaver,
+        duration_sec: float,
+        target_audio_channel: int,
+        context_audio_channel: int,
+        target_codebooks: int,
+        context_codebooks: int,
+    ):
         self.mimi = mimi
         self.interleaver = interleaver
         self.duration_sec = duration_sec
         self.num_audio_frames = math.ceil(duration_sec * mimi.frame_rate)
+        self.target_audio_channel = target_audio_channel
+        self.context_audio_channel = context_audio_channel
+        self.target_codebooks = target_codebooks
+        self.context_codebooks = context_codebooks
+
+    def _encode_audio_channel(self, wav: np.ndarray, channel: int, codebooks: int):
+        if wav.ndim != 2:
+            raise ValueError(
+                "Full-duplex Moshi training expects stereo audio shaped [channels, samples]"
+            )
+        if channel >= wav.shape[0]:
+            raise ValueError(
+                f"Configured audio channel {channel} is unavailable in a "
+                f"{wav.shape[0]}-channel recording"
+            )
+
+        audio = torch.as_tensor(wav[channel], dtype=torch.float32, device="cuda")
+        with torch.no_grad():
+            tokens = self.mimi.encode(audio.view(1, 1, -1))
+        if tokens.shape[1] != codebooks:
+            raise ValueError(
+                f"Mimi produced {tokens.shape[1]} codebooks for channel {channel}; "
+                f"the Moshi stream requires {codebooks}"
+            )
+
+        tokens = tokens[..., : self.num_audio_frames]
+        actual_frames = tokens.shape[-1]
+        tokens = torch.nn.functional.pad(
+            tokens,
+            (0, self.num_audio_frames - actual_frames),
+            value=self.interleaver.zero_padding,
+        )
+        return tokens
 
     def __call__(self, wav: np.ndarray, start_sec: float, path: str) -> Sample:
-        with torch.no_grad():
-            audio_tensor = torch.Tensor(wav).cuda()
-            audio_tokens = self.mimi.encode(audio_tensor[:, None])
-            audio_tokens = audio_tokens[..., : self.num_audio_frames]
-            this_num_audio_frames = audio_tokens.shape[-1]
-            audio_tokens = torch.nn.functional.pad(
-                audio_tokens[..., : self.num_audio_frames],
-                (0, self.num_audio_frames - this_num_audio_frames),
-                value=self.interleaver.zero_padding,
-            )
-            audio_tokens = audio_tokens.view(1, -1, self.num_audio_frames)
+        if self.target_audio_channel == self.context_audio_channel:
+            raise ValueError("target and context audio channels must be different")
+        target_audio_tokens = self._encode_audio_channel(
+            wav, self.target_audio_channel, self.target_codebooks
+        )
+        context_audio_tokens = self._encode_audio_channel(
+            wav, self.context_audio_channel, self.context_codebooks
+        )
+        this_num_audio_frames = min(
+            target_audio_tokens.shape[-1], context_audio_tokens.shape[-1]
+        )
 
-            info_file = os.path.splitext(path)[0] + ".json"
-            with open(info_file) as f:
-                data = json.load(f)
-                alignments = data["alignments"]
+        info_file = os.path.splitext(path)[0] + ".json"
+        with open(info_file) as f:
+            data = json.load(f)
+            alignments = data["alignments"]
 
-            start_alignment = dicho(alignments, start_sec)
-            end_alignment = dicho(alignments, start_sec + self.duration_sec)
-            alignments = [
-                (a[0], (a[1][0] - start_sec, a[1][1] - start_sec), a[2])
-                for a in alignments[start_alignment:end_alignment]
-            ]
+        start_alignment = dicho(alignments, start_sec)
+        end_alignment = dicho(alignments, start_sec + self.duration_sec)
+        alignments = [
+            (a[0], (a[1][0] - start_sec, a[1][1] - start_sec), a[2])
+            for a in alignments[start_alignment:end_alignment]
+        ]
 
-            text_tokens = self.interleaver.prepare_item(
-                alignments, this_num_audio_frames
-            )
-            text_tokens = torch.nn.functional.pad(
-                text_tokens,
-                (0, self.num_audio_frames - text_tokens.shape[-1]),
-                value=self.interleaver.zero_padding,
-            )
+        text_tokens = self.interleaver.prepare_item(
+            alignments, this_num_audio_frames
+        )
+        text_tokens = torch.nn.functional.pad(
+            text_tokens,
+            (0, self.num_audio_frames - text_tokens.shape[-1]),
+            value=self.interleaver.zero_padding,
+        )
 
-            codes = torch.cat([text_tokens, audio_tokens], dim=1)
-            return Sample(codes, data.get("text_conditions", None))
+        # Moshi's standard layout is text, generated-speaker audio, then
+        # dialogue-context audio. LMModel applies its configured per-stream
+        # acoustic delays inside forward(), so keep these source streams
+        # aligned here.
+        codes = torch.cat(
+            [text_tokens, target_audio_tokens, context_audio_tokens], dim=1
+        )
+        return Sample(codes, data.get("text_conditions", None))

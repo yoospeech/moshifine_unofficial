@@ -26,6 +26,7 @@ def build_data_loader(
         world_size=world_size,
         is_eval=is_eval,
         shuffle_pretrain=args.shuffle,
+        max_audio_duration_sec=args.max_audio_duration_sec,
     )
 
     sample_list = []

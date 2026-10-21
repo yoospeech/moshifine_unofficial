@@ -150,7 +150,10 @@ def build_dataset(
     world_size: int,
     is_eval: bool,
     shuffle_pretrain: bool = False,
+    max_audio_duration_sec: float | None = None,
 ) -> Iterator[Sample]:
+    if max_audio_duration_sec is not None and max_audio_duration_sec <= 0:
+        raise ValueError("max_audio_duration_sec must be greater than zero")
     sources, probabilities = parse_data_sources(pretrain_data=pretrain_data)
 
     shuffle = not is_eval and shuffle_pretrain
@@ -164,6 +167,7 @@ def build_dataset(
             is_finite=is_eval,
             seed=seed,
             shuffle_at_epoch=shuffle,
+            max_audio_duration_sec=max_audio_duration_sec,
         )
         for source in sources
     ]
@@ -195,10 +199,45 @@ def get_dataset_iterator(
     is_finite: bool,
     seed: int | None,
     shuffle_at_epoch: bool,
+    max_audio_duration_sec: float | None,
 ) -> Iterator[Sample]:
     epoch = 1
+    allowed_paths_by_file: dict[Path, set[str] | None] = {}
     while True:
         for jsonl_file in source.jsonl_files:
+            if jsonl_file not in allowed_paths_by_file:
+                allowed_paths: set[str] | None = None
+                if max_audio_duration_sec is not None:
+                    allowed_paths = set()
+                    excluded = 0
+                    with jsonl_file.open(encoding="utf-8") as manifest:
+                        for line_number, line in enumerate(manifest, start=1):
+                            if not line.strip():
+                                continue
+                            try:
+                                record = json.loads(line)
+                                duration = float(record["duration"])
+                                path = str(record["path"])
+                            except (
+                                KeyError,
+                                TypeError,
+                                ValueError,
+                                json.JSONDecodeError,
+                            ) as exc:
+                                raise ValueError(
+                                    f"Invalid duration/path in {jsonl_file}: line {line_number}"
+                                ) from exc
+                            if duration < max_audio_duration_sec:
+                                allowed_paths.add(path)
+                            else:
+                                excluded += 1
+                    main_logger_info(
+                        f"{jsonl_file}: excluding {excluded} recording(s) with duration "
+                        f">= {max_audio_duration_sec:g}s"
+                    )
+                allowed_paths_by_file[jsonl_file] = allowed_paths
+            allowed_paths = allowed_paths_by_file[jsonl_file]
+
             dataset = sphn.dataset_jsonl(
                 str(jsonl_file),
                 duration_sec=instruct_tokenizer.duration_sec,
@@ -214,6 +253,11 @@ def get_dataset_iterator(
             else:
                 dataset = dataset.seq(skip=rank, step_by=world_size)
             for sample in dataset:
+                if (
+                    allowed_paths is not None
+                    and str(sample["path"]) not in allowed_paths
+                ):
+                    continue
                 wav = sample["data"][..., : sample["unpadded_len"]]
                 yield instruct_tokenizer(wav, sample["start_time_sec"], sample["path"])
         if is_finite:

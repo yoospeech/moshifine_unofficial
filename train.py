@@ -9,10 +9,10 @@ from pathlib import Path
 import fire
 import torch.cuda
 import torch.distributed as dist
+from moshi.models import loaders
 from torch.optim import AdamW, lr_scheduler
 
 # from torch.profiler import ProfilerActivity, profile
-
 from finetune.args import TrainArgs
 from finetune.checkpointing import Checkpointer
 from finetune.data.data_loader import build_data_loader
@@ -40,9 +40,9 @@ from finetune.monitoring.metrics_logger import (
     train_log_msg,
 )
 from finetune.monitoring.utils import set_logger
+from finetune.prepare_tokenizer import prepare_for_training
 from finetune.utils import TrainState, logged_closing, set_random_seed
 from finetune.wrapped_model import get_fsdp_model
-from moshi.models import loaders
 
 logger = logging.getLogger("train")
 
@@ -50,6 +50,28 @@ logger = logging.getLogger("train")
 def main_logger_info(message: str) -> None:
     if get_rank() == 0:
         logger.info(message)
+
+
+def build_optimizer(args: TrainArgs, model: torch.nn.Module) -> torch.optim.Optimizer:
+    if args.optim.optimizer_type == "adamw8bit":
+        try:
+            import bitsandbytes as bnb
+        except ImportError as exc:
+            raise RuntimeError(
+                "optim.optimizer_type=adamw8bit requires bitsandbytes; install the "
+                "Linux bitsandbytes dependency for this environment."
+            ) from exc
+        optimizer_class = bnb.optim.AdamW8bit
+        main_logger_info("Using bitsandbytes AdamW8bit optimizer.")
+    else:
+        optimizer_class = AdamW
+    return optimizer_class(
+        (p for p in model.parameters() if p.requires_grad),
+        lr=args.optim.lr,
+        betas=(0.9, 0.95),
+        eps=1e-08,
+        weight_decay=args.optim.weight_decay,
+    )
 
 
 def train(config: str):
@@ -63,6 +85,7 @@ def train(config: str):
 
 def _train(args: TrainArgs, exit_stack: ExitStack):
     # 1. Initial setup and checks
+    args.validate_training_mode()
     set_random_seed(args.seed)
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -89,11 +112,6 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
         elif run_dir.exists():
             main_logger_info(f"Removing run dir {run_dir}...")
             shutil.rmtree(run_dir)
-
-    if args.full_finetuning:
-        assert not args.lora.enable, "LoRA should not be enabled for full finetuning."
-    else:
-        assert args.lora.enable, "LoRA should be enabled for partial finetuning"
 
     dist.barrier()
     run_dir.mkdir(exist_ok=True, parents=True)
@@ -133,6 +151,8 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
         config_path=args.moshi_paths.config_path,
     )
 
+    checkpoint_info, vocab_mapping = prepare_for_training(args, checkpoint_info, run_dir)
+
     lm_config = (
         loaders._lm_kwargs
         if checkpoint_info.raw_config is None
@@ -148,9 +168,11 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
         p.requires_grad = False
 
     # 4.2 Load and shard model, prepare interleaver for audio/text tokens.
-    model = get_fsdp_model(args, checkpoint_info)
+    model = get_fsdp_model(args, checkpoint_info, vocab_mapping=vocab_mapping)
 
     spm = checkpoint_info.get_text_tokenizer()
+    if spm.vocab_size() != model.text_card:
+        raise ValueError("Tokenizer vocabulary and model.text_card do not match")
 
     interleaver = Interleaver(
         spm,
@@ -161,7 +183,13 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
         keep_main_only=True,
     )
     interleaved_tokenizer = InterleavedTokenizer(
-        mimi, interleaver, duration_sec=args.duration_sec
+        mimi,
+        interleaver,
+        duration_sec=args.duration_sec,
+        target_audio_channel=args.data.target_audio_channel,
+        context_audio_channel=args.data.context_audio_channel,
+        target_codebooks=model.dep_q,
+        context_codebooks=model.n_q - model.dep_q,
     )
 
     # 5. Load data loaders
@@ -193,14 +221,9 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
 
     assert args.lora is not None, "`args.lora` should be set to a valid value."
 
-    # 7. Load optimizer
-    optimizer = AdamW(
-        model.parameters(),
-        lr=args.optim.lr,
-        betas=(0.9, 0.95),
-        eps=1e-08,
-        weight_decay=args.optim.weight_decay,
-    )
+    # 7. Load optimizer. 8-bit Adam stores moment estimates in quantized form,
+    # reducing optimizer-state memory for full temporal-branch fine-tuning.
+    optimizer = build_optimizer(args, model)
 
     scheduler = lr_scheduler.OneCycleLR(
         optimizer,
@@ -221,6 +244,7 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
             optimizer=optimizer,
             num_ckpt_keep=args.num_ckpt_keep,
             full_finetuning=args.full_finetuning,
+            tokenizer_path=checkpoint_info.tokenizer,
         )
     # 9. Prepare mixed precision
     prepare_mixed_precision(
@@ -272,6 +296,8 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
                 first_codebook_weight_multiplier=args.first_codebook_weight_multiplier,
             )
 
+            # Keep audio CE in the graph even when the depth parameters are frozen:
+            # its gradient must flow through depth into the temporal transformer.
             mb_loss = text_loss + audio_loss
             mb_loss.backward()
 
@@ -348,7 +374,7 @@ def _train(args: TrainArgs, exit_stack: ExitStack):
             (args.ckpt_freq > 0 and state.step % args.ckpt_freq == 0) or is_last_step
         ):
             checkpointer.save_checkpoint(
-                save_only_lora=not args.full_finetuning and args.save_adapters,
+                save_only_lora=args.lora.enable and args.save_adapters,
                 dtype=param_dtype,
             )
 

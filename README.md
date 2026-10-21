@@ -1,5 +1,8 @@
 # Moshi-Finetune
 
+한국어 tokenizer 자동 학습 및 local-only Stage 1 → joint Stage 2 실행 방법:
+[한국어 학습 가이드](example/local_only.md).
+
 <a target="_blank" href="https://colab.research.google.com/github//kyutai-labs/moshi-finetune/blob/main/tutorials/moshi_finetune.ipynb">
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
 </a>

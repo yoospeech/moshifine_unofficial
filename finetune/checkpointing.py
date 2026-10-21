@@ -33,6 +33,7 @@ class Checkpointer:
         optimizer: torch.optim.Optimizer | None = None,
         num_ckpt_keep: int | None = None,
         full_finetuning: bool = False,
+        tokenizer_path: Path | str | None = None,
     ):
         self.model = model
         self.optimizer = optimizer
@@ -41,7 +42,8 @@ class Checkpointer:
         self.rank = get_rank()
         self.num_ckpt_keep = num_ckpt_keep
         self.full_finetuning = full_finetuning
-        self.config = config
+        self.config = dict(config)
+        self.tokenizer_path = Path(tokenizer_path) if tokenizer_path is not None else None
 
     @property
     def ckpt_dir(self) -> Path:
@@ -81,8 +83,15 @@ class Checkpointer:
 
     def write_params_info(self, tmp_dst: Path):
         params_path = tmp_dst / "config.json"
+        config = dict(self.config)
+        if self.tokenizer_path is not None:
+            tokenizer_name = "tokenizer_spm.model"
+            shutil.copyfile(self.tokenizer_path, tmp_dst / tokenizer_name)
+            config["tokenizer_name"] = tokenizer_name
+        if not config.get("lora", False):
+            config["moshi_name"] = "consolidated.safetensors"
         with open(params_path, "w") as f:
-            f.write(json.dumps(self.config, indent=4))
+            f.write(json.dumps(config, indent=4))
 
     @staticmethod
     def get_non_lora_states(

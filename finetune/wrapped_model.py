@@ -15,6 +15,8 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataP
 
 from .args import TrainArgs
 from .distributed import get_rank, get_world_size
+from .prepare_tokenizer import remap_text_weights
+from .trainable import freeze_for_local_training
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +98,7 @@ def initialize_lora_parameters(model: torch.nn.Module, param_dtype: torch.dtype)
 
 
 def get_fsdp_model(
-    args: TrainArgs, checkpointer_info: CheckpointInfo
+    args: TrainArgs, checkpointer_info: CheckpointInfo, vocab_mapping: dict | None = None
 ) -> FullyShardedDataParallel | LMModel:
     """
     Initializes and returns a FullyShardedDataParallel (FSDP) LMModel or a non sharded LMModel if one GPU available.
@@ -136,6 +138,8 @@ def get_fsdp_model(
 
         assert _is_safetensors(moshi_weight), "Model is not safetensors"
         model_state_dict = safetensors.torch.load_file(moshi_weight)
+        if vocab_mapping is not None:
+            remap_text_weights(model_state_dict, vocab_mapping)
 
         logger.info(f"Converting model to dtype {param_dtype} ...")
 
@@ -171,7 +175,10 @@ def get_fsdp_model(
     torch.distributed.barrier()
 
     # only finetune LoRA parameters and freeze before wrapping
-    if args.lora.enable and not args.full_finetuning:
+    if args.local_only:
+        freeze_for_local_training(model)
+        main_logger_info("Training temporal/text branch with frozen depth/audio branch.")
+    elif args.lora.enable and not args.full_finetuning:
         for name, param in model.named_parameters():
             if "lora" in name:
                 param.requires_grad = True
@@ -186,7 +193,7 @@ def get_fsdp_model(
     if get_world_size() == 1:
         return model.cuda()
 
-    auto_wrap_policy = get_fsdp_policy(args.lora.enable)
+    auto_wrap_policy = get_fsdp_policy(args.lora.enable or args.local_only)
 
     main_logger_info(f"Sharding model over {get_world_size()} GPUs ...")
 

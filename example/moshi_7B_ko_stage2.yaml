@@ -1,0 +1,41 @@
+# Continue from stage 1 with BOTH temporal and depth weights trainable.
+# Adjust the checkpoint directory if stage 1 ends at a different step.
+data:
+  train_data: "/home/ysw/Documents/eee/moshi-finetune_re/personaplex-finetune/data/korean_talk_contiguous/omnivoice_moshi/moshi_train.jsonl"
+  eval_data: "/home/ysw/Documents/eee/moshi-finetune_re/personaplex-finetune/data/korean_talk_contiguous/omnivoice_moshi/moshi_eval.jsonl"
+  shuffle: true
+  max_audio_duration_sec: 200
+  target_audio_channel: 0
+  context_audio_channel: 1
+moshi_paths:
+  hf_repo_id: "kyutai/moshiko-pytorch-bf16"
+  moshi_path: "runs/moshi_7B_local_only_ko/checkpoints/checkpoint_002000/consolidated/consolidated.safetensors"
+  tokenizer_path: "runs/moshi_7B_local_only_ko/checkpoints/checkpoint_002000/consolidated/tokenizer_spm.model"
+  config_path: "runs/moshi_7B_local_only_ko/checkpoints/checkpoint_002000/consolidated/config.json"
+tokenizer:
+  enable: false # Reuse stage 1 token IDs and learned embedding rows.
+local_only: false
+full_finetuning: true
+lora:
+  enable: false
+save_adapters: false
+first_codebook_weight_multiplier: 100.0
+text_padding_weight: 0.5
+duration_sec: 10
+batch_size: 1
+num_microbatches: 1
+max_steps: 2000
+gradient_checkpointing: true
+optim:
+  optimizer_type: adamw8bit
+  lr: 2.0e-6
+  weight_decay: 0.1
+  pct_start: 0.05
+log_freq: 1
+do_eval: true
+eval_freq: 100
+do_ckpt: true
+ckpt_freq: 100
+num_ckpt_keep: 3
+run_dir: "runs/moshi_7B_joint_ko_stage2"
+overwrite_run_dir: false

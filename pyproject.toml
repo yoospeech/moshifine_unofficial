@@ -9,6 +9,8 @@ dependencies = [
   "simple-parsing",
   "pyyaml",
   "safetensors",
+  "sentencepiece>=0.2",
+  "protobuf>=4",
   "tensorboard",
   "tqdm",
   "torch==2.6",

@@ -8,9 +8,10 @@ data:
 moshi_paths: 
   hf_repo_id: "kyutai/moshiko-pytorch-bf16"
 
-full_finetuning: false # Activate lora.enable if partial finetuning
+local_only: true # Temporal transformer + text embedding/head/norm; freeze depth/audio
+full_finetuning: false
 lora:
-  enable: true # Set to False if full_finetuning is True
+  enable: false # local_only updates branch weights directly
   rank: 128
   scaling: 2.
   ft_embed: false # Optional, set to True if you want to finetune the embedding layer
@@ -37,7 +38,7 @@ do_ckpt: true
 ckpt_freq: 100
 
 
-save_adapters: true # Must be False if full_finetuning is True
+save_adapters: false # Save the complete model, including the frozen depth branch
 
 run_dir: ""  # Fill
 
